@@ -1,0 +1,338 @@
+// VeriBhoomi data model
+// ----------------------
+// A property is the centre of a web: owners, inheritance, taxes, govt approvals,
+// disputes, liens. The fraud engine reads this whole web and produces Findings.
+// Postgres + Prisma. Designed to be readable — every model maps to a real-world thing.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- ENUMS (fixed sets of allowed values) ----------
+
+enum PartyType {
+  PERSON
+  ORG
+  GOVT_BODY
+}
+
+enum DocumentType {
+  SALE_DEED
+  MUTATION
+  TAX_RECEIPT
+  ENCUMBRANCE_CERT
+  GOVT_APPROVAL
+}
+
+enum DocStatus {
+  OFFICIAL // attached to the authoritative record by an officer/authority
+  PENDING // a citizen-submitted supporting paper, not yet part of the record
+  SUPERSEDED // replaced by a newer document; kept for the audit trail (append-only)
+}
+
+enum GovtLevel {
+  PANCHAYAT
+  MUNICIPAL
+  DISTRICT
+  STATE
+}
+
+enum DisputeStatus {
+  OPEN
+  CLOSED
+  STAYED
+}
+
+enum Severity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+enum UserRole {
+  CITIZEN
+  OFFICER
+  AUTHORITY
+  ADMIN
+}
+
+enum PropertyStatus {
+  CLEAR
+  UNDER_REVIEW
+  DISPUTED
+  FLAGGED
+}
+
+// A citizen's request to have a property officially checked. This is the
+// formal handoff from the public to the bureaucracy: it lands in an officer's
+// caseload, gets worked, and comes back with an outcome.
+enum RequestPurpose {
+  PURCHASE // thinking of buying
+  LOAN // bank wants clear title
+  INHERITANCE // settling an estate
+  GENERAL // just checking
+}
+
+enum RequestStatus {
+  SUBMITTED // citizen filed it
+  IN_REVIEW // an officer picked it up
+  CLEARED // officer found it safe
+  FLAGGED // officer found problems
+  REJECTED // not enough info / out of scope
+}
+
+// ---------- CORE PROPERTY WEB ----------
+
+model Property {
+  id        String         @id @default(cuid())
+  surveyNo  String // government survey number
+  khataNo   String // khata / assessment number
+  area      Float // in square feet
+  district  String
+  taluk     String
+  village   String
+  lat       Float? // map coordinates (approximate, for the dashboard map)
+  lng       Float?
+  status    PropertyStatus @default(UNDER_REVIEW)
+  createdAt DateTime       @default(now())
+
+  // relations (one property -> many of each)
+  ownerships    OwnershipRecord[]
+  inheritances  InheritanceRecord[]
+  documents     Document[]
+  taxRecords    TaxRecord[]
+  approvals     GovtApproval[]
+  disputes      Dispute[]
+  encumbrances  Encumbrance[]
+  findings      Finding[]
+  healthScores  HealthScore[]
+  verifications VerificationRequest[]
+
+  @@index([district, taluk, village])
+}
+
+model Party {
+  id      String    @id @default(cuid())
+  type    PartyType @default(PERSON)
+  name    String
+  idRef   String? // Aadhaar/PAN ref placeholder (not real)
+  contact String?
+
+  // back-relations: a party can appear in many roles
+  ownerships         OwnershipRecord[]
+  inheritedFrom      InheritanceRecord[] @relation("from")
+  inheritedTo        InheritanceRecord[] @relation("to")
+  taxRecords         TaxRecord[]
+  encumbrancesLender Encumbrance[]
+  disputeLinks       DisputeParty[]
+}
+
+// Chain of title. Overlapping [fromDate,toDate] for the SAME property but
+// DIFFERENT owners is the classic double-selling signal.
+model OwnershipRecord {
+  id         String    @id @default(cuid())
+  property   Property  @relation(fields: [propertyId], references: [id])
+  propertyId String
+  owner      Party     @relation(fields: [ownerId], references: [id])
+  ownerId    String
+  fromDate   DateTime
+  toDate     DateTime? // null = current owner
+  deedDoc    Document? @relation(fields: [deedDocId], references: [id])
+  deedDocId  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([propertyId, fromDate])
+}
+
+model InheritanceRecord {
+  id         String   @id @default(cuid())
+  property   Property @relation(fields: [propertyId], references: [id])
+  propertyId String
+  fromParty  Party    @relation("from", fields: [fromId], references: [id])
+  fromId     String
+  toParty    Party    @relation("to", fields: [toId], references: [id])
+  toId       String
+  basis      String // will / succession certificate / partition
+  date       DateTime
+}
+
+model Document {
+  id              String           @id @default(cuid())
+  property        Property         @relation(fields: [propertyId], references: [id])
+  propertyId      String
+  type            DocumentType
+  // --- the actual file ---
+  storageKey      String? // object key in the bucket (or local path); null = metadata-only
+  fileName        String? // original filename, for download
+  mimeType        String? // application/pdf, image/jpeg, ...
+  fileSize        Int? // bytes
+  // OCR output: arbitrary extracted key/values e.g. { "area": 2400, "ownerName": "..." }
+  extractedFields Json
+  ocrConfidence   Float            @default(1.0) // 0..1; low = needs human eyes
+  // --- provenance & standing ---
+  status          DocStatus        @default(OFFICIAL)
+  uploadedBy      User?            @relation(fields: [uploadedById], references: [id])
+  uploadedById    String?
+  // when an officer attaches a doc that contradicts an existing one, they must
+  // justify it; the reason is preserved here AND in the audit log.
+  overrideReason  String?
+  // append-only supersede chain: this doc was replaced by `supersededBy`.
+  // The old doc is never deleted — it flips to status SUPERSEDED.
+  supersededBy    Document?        @relation("supersede", fields: [supersededById], references: [id])
+  supersededById  String?          @unique
+  supersedes      Document?        @relation("supersede")
+  createdAt       DateTime         @default(now())
+
+  ownershipRecords OwnershipRecord[]
+
+  @@index([propertyId, status])
+}
+
+model TaxRecord {
+  id         String   @id @default(cuid())
+  property   Property @relation(fields: [propertyId], references: [id])
+  propertyId String
+  payer      Party    @relation(fields: [payerId], references: [id])
+  payerId    String
+  year       Int
+  amount     Float
+  status     String // PAID / DUE
+}
+
+model GovtApproval {
+  id         String    @id @default(cuid())
+  property   Property  @relation(fields: [propertyId], references: [id])
+  propertyId String
+  authority  String
+  level      GovtLevel
+  status     String // APPROVED / PENDING / REJECTED
+}
+
+model Dispute {
+  id         String         @id @default(cuid())
+  property   Property       @relation(fields: [propertyId], references: [id])
+  propertyId String
+  court      String
+  caseNo     String
+  status     DisputeStatus  @default(OPEN)
+  filedDate  DateTime
+  parties    DisputeParty[]
+}
+
+// join table: a dispute involves many parties, a party in many disputes
+model DisputeParty {
+  id        String  @id @default(cuid())
+  dispute   Dispute @relation(fields: [disputeId], references: [id])
+  disputeId String
+  party     Party   @relation(fields: [partyId], references: [id])
+  partyId   String
+  role      String // PLAINTIFF / DEFENDANT / CLAIMANT
+}
+
+model Encumbrance {
+  id          String    @id @default(cuid())
+  property    Property  @relation(fields: [propertyId], references: [id])
+  propertyId  String
+  lender      Party     @relation(fields: [lenderId], references: [id])
+  lenderId    String
+  amount      Float
+  active      Boolean   @default(true) // true = lien NOT cleared
+  clearedDate DateTime?
+}
+
+// ---------- FRAUD ENGINE OUTPUT ----------
+
+// One problem the engine found. linkedRecordIds points back at the exact
+// records that triggered it — this is what makes a finding transparent.
+model Finding {
+  id              String   @id @default(cuid())
+  property        Property @relation(fields: [propertyId], references: [id])
+  propertyId      String
+  ruleKey         String // e.g. "DOUBLE_SELLING"
+  severity        Severity
+  title           String
+  description     String
+  linkedRecordIds Json // array of ids that caused this finding
+  // human-in-the-loop
+  humanVerified   Boolean  @default(false)
+  expertNotes     String?
+  verifiedById    String?
+  verifiedBy      User?    @relation(fields: [verifiedById], references: [id])
+  verifiedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([propertyId, severity])
+}
+
+model HealthScore {
+  id         String   @id @default(cuid())
+  property   Property @relation(fields: [propertyId], references: [id])
+  propertyId String
+  score      Int // 0..100
+  breakdown  Json // how each point was deducted (transparency)
+  computedAt DateTime @default(now())
+
+  @@index([propertyId, computedAt])
+}
+
+// ---------- USERS, ROLES, AUDIT ----------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         UserRole @default(CITIZEN)
+  jurisdiction String? // district an officer/authority is scoped to; null for citizen/admin
+  createdAt    DateTime @default(now())
+
+  verifiedFindings Finding[]
+  auditLogs        AuditLog[]
+  requestsMade     VerificationRequest[] @relation("requester")
+  requestsHandled  VerificationRequest[] @relation("handler")
+  documentsUploaded Document[]
+}
+
+// The citizen→officer case file. A citizen opens one against a property;
+// it appears in the officer's queue scoped to their district; the officer
+// works it and sets an outcome. Every property report a citizen sees is
+// framed by one of these requests.
+model VerificationRequest {
+  id          String         @id @default(cuid())
+  property    Property       @relation(fields: [propertyId], references: [id])
+  propertyId  String
+  requester   User           @relation("requester", fields: [requesterId], references: [id])
+  requesterId String
+  purpose     RequestPurpose @default(GENERAL)
+  note        String? // citizen's own note ("planning to buy from Mr. Gupta")
+  status      RequestStatus  @default(SUBMITTED)
+  officer     User?          @relation("handler", fields: [officerId], references: [id])
+  officerId   String?
+  officerNote String? // officer's reply to the citizen
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([status, propertyId])
+  @@index([requesterId, createdAt])
+}
+
+// Append-only. Every sensitive view/edit lands here: who, what, when, before/after.
+model AuditLog {
+  id        String   @id @default(cuid())
+  actor     User     @relation(fields: [actorId], references: [id])
+  actorId   String
+  action    String // VIEW / CREATE / UPDATE / VERIFY / OVERRIDE
+  entity    String // "Finding", "Property", ...
+  entityId  String
+  before    Json?
+  after     Json?
+  timestamp DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([actorId, timestamp])
+}

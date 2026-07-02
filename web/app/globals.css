@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-parchment text-ink font-sans antialiased;
+  /* subtle paper grain via layered radial dots */
+  background-image:
+    radial-gradient(rgba(27, 42, 65, 0.025) 1px, transparent 1px),
+    radial-gradient(rgba(27, 42, 65, 0.02) 1px, transparent 1px);
+  background-size: 18px 18px, 24px 24px;
+  background-position: 0 0, 9px 9px;
+}
+
+h1, h2, h3, h4 {
+  @apply font-serif text-ink;
+}
+
+/* survey-grid background utility for hero/section backdrops */
+.bg-survey {
+  background-image:
+    linear-gradient(rgba(27, 42, 65, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27, 42, 65, 0.06) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* a thin "ledger rule" underline */
+.rule {
+  @apply border-b border-ink/15;
+}
+
+/* React Flow base tweaks to match the theme */
+.react-flow__node {
+  font-family: var(--font-sans);
+}

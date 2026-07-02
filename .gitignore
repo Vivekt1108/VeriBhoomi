@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# env / secrets — NEVER commit these
+.env
+**/.env
+*.local
+
+# build output
+dist/
+.next/
+build/
+
+# uploaded document scans (local-disk storage fallback)
+**/uploads/
+
+# prisma generated client
+**/generated/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+
+# logs
+*.log
+npm-debug.log*
